@@ -8,6 +8,27 @@ const chargeItemSchema = new mongoose.Schema(
     amount: { type: Number, required: true, default: 0 },
     note: { type: String, default: '' },
     date: { type: Date, default: Date.now },
+    // When true, days/amount follow noon billable-day sync. Manual add-charge sets false.
+    autoDays: { type: Boolean, default: true },
+  },
+  { _id: true }
+);
+
+const medicineItemSchema = new mongoose.Schema(
+  {
+    name: { type: String, trim: true, default: '' },
+    dose: { type: String, trim: true, default: '' },
+    timing: { type: String, trim: true, default: '' },
+    duration: { type: String, trim: true, default: '' },
+  },
+  { _id: true }
+);
+
+const paymentEntrySchema = new mongoose.Schema(
+  {
+    amount: { type: Number, required: true, min: 0 },
+    receivedAt: { type: Date, required: true, default: Date.now },
+    note: { type: String, trim: true, default: '' },
   },
   { _id: true }
 );
@@ -25,6 +46,11 @@ const patientSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
+    careType: {
+      type: String,
+      enum: ['Admission', 'Observation', ''],
+      default: '',
+    },
     name: {
       type: String,
       required: true,
@@ -35,9 +61,19 @@ const patientSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
+    gender: {
+      type: String,
+      enum: ['Male', 'Female'],
+      required: true,
+    },
     age: {
       type: Number,
       required: true,
+    },
+    ageUnit: {
+      type: String,
+      enum: ['Days', 'Months', 'Years'],
+      default: 'Years',
     },
     address: {
       type: String,
@@ -45,6 +81,16 @@ const patientSchema = new mongoose.Schema(
       default: '',
     },
     telNo: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    referralType: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    referralDescription: {
       type: String,
       trim: true,
       default: '',
@@ -97,10 +143,12 @@ const patientSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    /** Cached sum of paymentHistory (kept for unpaid / earnings summaries) */
     amountReceived: {
       type: Number,
       default: 0,
     },
+    paymentHistory: [paymentEntrySchema],
     billNo: {
       type: String,
       default: '',
@@ -115,6 +163,49 @@ const patientSchema = new mongoose.Schema(
     },
     dischargeTime: {
       type: String,
+      default: '',
+    },
+    principleDiagnosis: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    associateDiagnosis: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    historyExamination: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    investigation: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    managementHospitalCourse: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    medicines: [medicineItemSchema],
+    followUpDate: {
+      type: String,
+      default: '',
+    },
+    followUpDay: {
+      type: String,
+      default: '',
+    },
+    followUpTime: {
+      type: String,
+      default: '',
+    },
+    patientType: {
+      type: String,
+      trim: true,
       default: '',
     },
     createdBy: {

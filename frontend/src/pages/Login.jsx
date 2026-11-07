@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 export default function Login() {
-  const [email, setEmail] = useState('');
+  const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -15,8 +15,14 @@ export default function Login() {
     setError('');
     setLoading(true);
     try {
-      await login(email, password);
-      navigate('/');
+      const data = await login(loginId, password);
+      const home =
+        data.role === 'registration'
+          ? '/patients/new'
+          : data.role === 'clinician'
+            ? '/patients'
+            : '/';
+      navigate(home);
     } catch (err) {
       setError(err.response?.data?.message || 'Login failed');
     } finally {
@@ -38,18 +44,18 @@ export default function Login() {
         <form onSubmit={handleSubmit}>
           <div className="form-grid">
             <div className="form-group">
-              <label className="form-label" htmlFor="email">
-                Email
+              <label className="form-label" htmlFor="loginId">
+                Username or Email
               </label>
               <input
-                id="email"
-                type="email"
+                id="loginId"
+                type="text"
                 className="form-input"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@hospital.com"
+                value={loginId}
+                onChange={(e) => setLoginId(e.target.value)}
+                placeholder="user1@azizahusseni.com"
                 required
-                autoComplete="email"
+                autoComplete="username"
               />
             </div>
             <div className="form-group">
