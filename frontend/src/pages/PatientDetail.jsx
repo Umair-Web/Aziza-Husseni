@@ -1,14 +1,30 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import api from '../api';
 import { useAuth } from '../context/AuthContext';
 import { useConfirm } from '../components/ConfirmDialog';
 import ClinicalTermField from '../components/ClinicalTermField';
+import AdvancePaymentSlip from '../components/AdvancePaymentSlip';
+import PaymentReceiptSlip from '../components/PaymentReceiptSlip';
 import DischargeSummaryPrint from '../components/DischargeSummaryPrint';
 import PatientBillPrint from '../components/PatientBillPrint';
+import SlipActionMenu from '../components/SlipActionMenu';
+import { captureSlipImage, SLIP_SELECTORS } from '../utils/captureSlip';
 import { combineDateAndTime, countBillableDays } from '../utils/billingDays';
-import { UNITS, subTypesForUnit, labelForScope } from '../utils/chargeUnits';
+import {
+  UNITS,
+  subTypesForUnit,
+  acTypesForUnit,
+  categoryMatchesPatient,
+  labelForScope,
+} from '../utils/chargeUnits';
 import { isUnpaidBill, totalAmountReceived } from '../utils/billingStatus';
+import {
+  computeDiscountAmount,
+  discountLabel,
+  patientDiscountAmount,
+} from '../utils/billingDiscount';
+import { DISCHARGE_TYPES, dischargeTypeLabel } from '../utils/dischargeTypes';
 import { TERMINOLOGY_TYPES, termsForType } from '../utils/terminology';
 
 function formatDate(d) {
@@ -74,6 +90,7 @@ const emptyMedicine = () => ({
 const emptyDischargeForm = () => ({
   dischargeDate: new Date().toISOString().slice(0, 10),
   dischargeTime: '',
+  dischargeType: '',
   advance: '',
   amountReceived: '',
   patientType: '',
@@ -99,12 +116,14 @@ function patientToForm(p) {
   return {
     bedNo: p.bedNo || '',
     careType: p.careType || (p.bedNo === 'NICU' ? 'Admission' : p.bedNo ? 'Admission' : ''),
+    acType: p.bedNo === 'Ward' ? p.acType || 'With AC' : '',
     ipd: p.ipd || '',
     name: p.name || '',
     relativeOf: p.relativeOf || '',
     gender: p.gender || 'Male',
     age: p.age ?? '',
     ageUnit: p.ageUnit || 'Years',
+    weight: p.weight ?? '',
     address: p.address || '',
     telNo: p.telNo || '',
     referralType: p.referralType || '',
@@ -136,6 +155,8 @@ export default function PatientDetail() {
   const [deleting, setDeleting] = useState(false);
   const [particulars, setParticulars] = useState([]);
   const [referrals, setReferrals] = useState([]);
+  const [rmoList, setRmoList] = useState([]);
+  const [consultantList, setConsultantList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -148,9 +169,17 @@ export default function PatientDetail() {
   const [saving, setSaving] = useState(false);
   const [amountReceivedInput, setAmountReceivedInput] = useState('');
   const [savingAmount, setSavingAmount] = useState(false);
+  const [discountType, setDiscountType] = useState('');
+  const [discountValue, setDiscountValue] = useState('');
+  const [savingDiscount, setSavingDiscount] = useState(false);
+  const [receiptPayment, setReceiptPayment] = useState(null);
   const [dischargeForm, setDischargeForm] = useState(emptyDischargeForm);
   const [clinicalForm, setClinicalForm] = useState(emptyDischargeForm);
   const [terminologies, setTerminologies] = useState([]);
+  const [selectedChargeIds, setSelectedChargeIds] = useState([]);
+  const [bulkChargeBusy, setBulkChargeBusy] = useState(false);
+  const [sendingWhatsApp, setSendingWhatsApp] = useState(false);
+  const skipPaymentAutoPrint = useRef(false);
 
   const clinicalTerms = useMemo(() => {
     const map = {};
@@ -175,9 +204,13 @@ export default function PatientDetail() {
     const className =
       mode === 'discharge'
         ? 'print-discharge'
-        : mode === 'detailed'
-          ? 'print-bill-detailed'
-          : 'print-bill-simple';
+        : mode === 'advance'
+          ? 'print-advance'
+          : mode === 'payment'
+            ? 'print-payment'
+            : mode === 'detailed'
+              ? 'print-bill-detailed'
+              : 'print-bill-simple';
     document.body.classList.add(className);
     let done = false;
     const cleanup = () => {
@@ -185,11 +218,72 @@ export default function PatientDetail() {
       done = true;
       document.body.classList.remove(className);
       window.removeEventListener('afterprint', cleanup);
+      if (mode === 'payment') setReceiptPayment(null);
     };
     window.addEventListener('afterprint', cleanup);
     window.print();
     setTimeout(cleanup, 2000);
   };
+
+  const printPaymentReceipt = (payment) => {
+    setReceiptPayment(payment);
+  };
+
+  const handleSendWhatsApp = async (type, paymentId) => {
+    const phone = String(patient?.telNo || '').trim();
+    if (!phone) {
+      setError('Patient Tel No. is required to send WhatsApp slip');
+      return;
+    }
+
+    const selector = SLIP_SELECTORS[type];
+    if (!selector) {
+      setError('Unknown slip type');
+      return;
+    }
+
+    setSendingWhatsApp(true);
+    setError('');
+    setSuccess('');
+    try {
+      // Payment slip mounts only when receiptPayment is set
+      if (type === 'payment' && paymentId) {
+        const payment = (patient.paymentHistory || []).find(
+          (p) => String(p._id) === String(paymentId)
+        );
+        if (!payment) throw new Error('Payment entry not found');
+        skipPaymentAutoPrint.current = true;
+        setReceiptPayment(payment);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+
+      const image = await captureSlipImage(selector);
+      const { data } = await api.post(`/patients/${id}/whatsapp-slip`, {
+        type,
+        phone,
+        image,
+        ...(paymentId ? { paymentId } : {}),
+      });
+      setSuccess(data.message || 'Slip image sent on WhatsApp');
+    } catch (err) {
+      setError(
+        err.response?.data?.message || err.message || 'Failed to send WhatsApp slip'
+      );
+    } finally {
+      if (type === 'payment') setReceiptPayment(null);
+      setSendingWhatsApp(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!receiptPayment) return undefined;
+    if (skipPaymentAutoPrint.current) {
+      skipPaymentAutoPrint.current = false;
+      return undefined;
+    }
+    const timer = setTimeout(() => printDocument('payment'), 50);
+    return () => clearTimeout(timer);
+  }, [receiptPayment]);
 
   const load = async () => {
     setLoading(true);
@@ -199,18 +293,32 @@ export default function PatientDetail() {
       const unit = pRes.data.bedNo || '';
       const careType =
         pRes.data.careType || (unit === 'NICU' ? 'Admission' : unit ? 'Admission' : '');
-      const [partRes, refRes] = await Promise.all([
-        api.get('/charge-categories', {
-          params: unit && careType ? { unit, subType: careType } : {},
-        }),
+      const acType = unit === 'Ward' ? pRes.data.acType || 'With AC' : '';
+      const catParams = unit && careType ? { unit, subType: careType } : {};
+      const [partRes, refRes, staffRes] = await Promise.all([
+        api.get('/charge-categories', { params: catParams }),
         api.get('/referrals'),
+        api.get('/clinical-staff').catch(() => ({ data: [] })),
       ]);
       setPatient(pRes.data);
-      setParticulars(partRes.data);
+      setSelectedChargeIds([]);
+      const matched = (partRes.data || []).filter((c) =>
+        categoryMatchesPatient(c, unit, careType, acType)
+      );
+      setParticulars(matched);
       setReferrals(refRes.data);
+      const staff = staffRes.data || [];
+      setRmoList(staff.filter((s) => s.role === 'rmo'));
+      setConsultantList(staff.filter((s) => s.role === 'consultant'));
       setEditForm(patientToForm(pRes.data));
       setAmountReceivedInput('');
-      const first = partRes.data[0];
+      setDiscountType(pRes.data.discountType || '');
+      setDiscountValue(
+        pRes.data.discountValue != null && Number(pRes.data.discountValue) > 0
+          ? String(pRes.data.discountValue)
+          : ''
+      );
+      const first = matched[0];
       setCharge((c) => ({
         ...c,
         particular: first?.name || '',
@@ -235,11 +343,18 @@ export default function PatientDetail() {
   }, [id]);
 
   const total = (patient?.charges || []).reduce((s, c) => s + (c.amount || 0), 0);
+  const discountAmount = patientDiscountAmount(patient);
+  const netTotal = Math.max(0, total - discountAmount);
   const advance = Number(patient?.advance || 0);
   const amountReceived = totalAmountReceived(patient);
   const pendingPayment = Number(amountReceivedInput) || 0;
   const balance =
-    total - advance - amountReceived - (canManageBilling ? pendingPayment : 0);
+    netTotal - advance - amountReceived - (canManageBilling ? pendingPayment : 0);
+  const draftDiscountAmount = computeDiscountAmount(
+    total,
+    discountType,
+    discountValue
+  );
   const dischargeAdvance = Number(dischargeForm.advance) || 0;
   const dischargePayment =
     dischargeForm.amountReceived !== ''
@@ -247,7 +362,7 @@ export default function PatientDetail() {
       : 0;
   const dischargeRemainingDue = Math.max(
     0,
-    total - dischargeAdvance - amountReceived - dischargePayment
+    netTotal - dischargeAdvance - amountReceived - dischargePayment
   );
   const canConfirmDischarge = dischargeRemainingDue <= 0.009;
 
@@ -331,16 +446,146 @@ export default function PatientDetail() {
     }
   };
 
-  const handleRemoveCharge = async (chargeId) => {
+  const isActiveDailyCharge = (c) =>
+    Number(c.ratePerDay) > 0 && c.autoDays !== false && !c.stoppedAt;
+
+  const hasActiveParticular = (particular, exceptId) =>
+    (patient?.charges || []).some(
+      (c) =>
+        c._id !== exceptId &&
+        c.particular === particular &&
+        isActiveDailyCharge(c)
+    );
+
+  const canResumeCharge = (c) =>
+    Boolean(c.stoppedAt) &&
+    Number(c.ratePerDay) > 0 &&
+    !hasActiveParticular(c.particular, c._id);
+
+  const toggleChargeSelect = (chargeId) => {
+    setSelectedChargeIds((prev) =>
+      prev.includes(chargeId) ? prev.filter((id) => id !== chargeId) : [...prev, chargeId]
+    );
+  };
+
+  const handleResumeCharge = async (charge) => {
+    const ok = await confirm({
+      title: 'Activate again',
+      message:
+        'Keep the stopped period on the bill and start a new active period from today? Days will count again until discharge or stop.',
+      confirmLabel: 'Activate again',
+    });
+    if (!ok) return;
+    try {
+      const { data } = await api.post(
+        `/patients/${id}/charges/${charge._id}/resume`
+      );
+      setPatient(data);
+      setSelectedChargeIds([]);
+      setSuccess(`"${charge.particular}" activated again from today`);
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to activate charge');
+    }
+  };
+
+  const handleBatchStopCharges = async () => {
+    const ids = selectedChargeIds.filter((cid) => {
+      const c = (patient.charges || []).find((x) => x._id === cid);
+      return c && isActiveDailyCharge(c);
+    });
+    if (!ids.length) {
+      setError('Select at least one active daily charge to stop');
+      return;
+    }
+    const ok = await confirm({
+      title: 'Stop selected charges',
+      message: `Stop ${ids.length} charge${ids.length === 1 ? '' : 's'} from today? Days used so far will stay on the bill.`,
+      confirmLabel: 'Stop selected',
+    });
+    if (!ok) return;
+    setBulkChargeBusy(true);
+    setError('');
+    try {
+      const { data } = await api.post(`/patients/${id}/charges/batch-stop`, {
+        chargeIds: ids,
+      });
+      setPatient(data);
+      setSelectedChargeIds([]);
+      setSuccess(`Stopped ${ids.length} charge${ids.length === 1 ? '' : 's'}`);
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to stop selected charges');
+    } finally {
+      setBulkChargeBusy(false);
+    }
+  };
+
+  const handleBatchResumeCharges = async () => {
+    const ids = selectedChargeIds.filter((cid) => {
+      const c = (patient.charges || []).find((x) => x._id === cid);
+      return c && canResumeCharge(c);
+    });
+    if (!ids.length) {
+      setError('Select at least one stopped charge to activate');
+      return;
+    }
+    const ok = await confirm({
+      title: 'Activate selected charges',
+      message: `Activate ${ids.length} charge${ids.length === 1 ? '' : 's'} from today? Stopped periods stay on the bill.`,
+      confirmLabel: 'Activate selected',
+    });
+    if (!ok) return;
+    setBulkChargeBusy(true);
+    setError('');
+    try {
+      const { data } = await api.post(`/patients/${id}/charges/batch-resume`, {
+        chargeIds: ids,
+      });
+      setPatient(data);
+      setSelectedChargeIds([]);
+      setSuccess(`Activated ${ids.length} charge${ids.length === 1 ? '' : 's'}`);
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to activate selected charges');
+    } finally {
+      setBulkChargeBusy(false);
+    }
+  };
+
+  const handleRemoveCharge = async (charge) => {
+    const isActiveDaily = isActiveDailyCharge(charge);
+
+    if (isActiveDaily) {
+      const ok = await confirm({
+        title: 'Stop charge',
+        message:
+          'Stop this charge from today? Days used so far will stay on the bill and will not keep increasing until discharge.',
+        confirmLabel: 'Stop charge',
+      });
+      if (!ok) return;
+      try {
+        const { data } = await api.delete(`/patients/${id}/charges/${charge._id}`);
+        setPatient(data);
+        setSelectedChargeIds((prev) => prev.filter((x) => x !== charge._id));
+        setSuccess('Charge stopped — days used so far kept on the bill');
+      } catch (err) {
+        setError(err.response?.data?.message || 'Failed to stop charge');
+      }
+      return;
+    }
+
     const ok = await confirm({
       title: 'Remove charge',
-      message: 'Are you sure you want to remove this charge from the patient bill?',
+      message: charge.stoppedAt
+        ? 'Permanently remove this stopped charge from the bill? This cannot be undone.'
+        : 'Are you sure you want to remove this charge from the patient bill?',
       confirmLabel: 'Remove',
     });
     if (!ok) return;
     try {
-      const { data } = await api.delete(`/patients/${id}/charges/${chargeId}`);
+      const { data } = await api.delete(
+        `/patients/${id}/charges/${charge._id}?permanent=true`
+      );
       setPatient(data);
+      setSelectedChargeIds((prev) => prev.filter((x) => x !== charge._id));
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to remove charge');
     }
@@ -479,6 +724,7 @@ export default function PatientDetail() {
       const payload = {
         ...editForm,
         age: Number(editForm.age),
+        weight: editForm.weight === '' ? null : Number(editForm.weight),
       };
       if (canManageBilling) {
         payload.advance = Number(editForm.advance) || 0;
@@ -517,6 +763,59 @@ export default function PatientDetail() {
       setError(err.response?.data?.message || 'Failed to record payment');
     } finally {
       setSavingAmount(false);
+    }
+  };
+
+  const handleSaveDiscount = async () => {
+    const type =
+      discountType === 'percentage' || discountType === 'fixed' ? discountType : '';
+    let value = Number(discountValue) || 0;
+    if (type && value <= 0) {
+      setError('Enter a discount value greater than 0, or clear the discount type');
+      return;
+    }
+    if (type === 'percentage' && value > 100) value = 100;
+
+    setSavingDiscount(true);
+    setError('');
+    setSuccess('');
+    try {
+      const { data } = await api.put(`/patients/${id}`, {
+        discountType: type,
+        discountValue: type ? value : 0,
+      });
+      setPatient(data);
+      setDiscountType(data.discountType || '');
+      setDiscountValue(
+        data.discountValue != null && Number(data.discountValue) > 0
+          ? String(data.discountValue)
+          : ''
+      );
+      setSuccess(type ? 'Discount applied' : 'Discount cleared');
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to save discount');
+    } finally {
+      setSavingDiscount(false);
+    }
+  };
+
+  const handleClearDiscount = async () => {
+    setDiscountType('');
+    setDiscountValue('');
+    setSavingDiscount(true);
+    setError('');
+    setSuccess('');
+    try {
+      const { data } = await api.put(`/patients/${id}`, {
+        discountType: '',
+        discountValue: 0,
+      });
+      setPatient(data);
+      setSuccess('Discount cleared');
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to clear discount');
+    } finally {
+      setSavingDiscount(false);
     }
   };
 
@@ -561,6 +860,7 @@ export default function PatientDetail() {
       ...emptyDischargeForm(),
       advance: currentAdvance,
       amountReceived: remaining > 0 ? String(remaining) : '',
+      dischargeType: patient?.dischargeType || '',
       patientType: patient?.patientType || '',
       principleDiagnosis: patient?.principleDiagnosis || '',
       associateDiagnosis: patient?.associateDiagnosis || '',
@@ -577,6 +877,10 @@ export default function PatientDetail() {
 
   const handleDischarge = async (e) => {
     e.preventDefault();
+    if (!dischargeForm.dischargeType) {
+      setError('Please select a discharge type');
+      return;
+    }
     if (!canConfirmDischarge) {
       setError(
         `Clear all dues before discharge. Remaining balance: ${formatMoney(dischargeRemainingDue)}`
@@ -596,6 +900,7 @@ export default function PatientDetail() {
       const payload = {
         dischargeDate: dischargeForm.dischargeDate,
         dischargeTime: dischargeForm.dischargeTime,
+        dischargeType: dischargeForm.dischargeType,
         advance: Number(dischargeForm.advance) || 0,
         patientType: dischargeForm.patientType,
         principleDiagnosis: dischargeForm.principleDiagnosis,
@@ -657,11 +962,25 @@ export default function PatientDetail() {
               <span className="badge badge-unpaid">Unpaid Bill</span>
             )}
             <span className={`badge badge-${patient.status}`}>{patient.status}</span>
+            {!isAdmitted && patient.dischargeType && (
+              <span
+                className={`badge badge-discharge-type badge-discharge-${patient.dischargeType.toLowerCase()}`}
+              >
+                {patient.dischargeType}
+              </span>
+            )}
           </div>
           <div className="patient-meta" style={{ marginTop: '0.35rem' }}>
             <span>Reg: {patient.hospitalRegNo}</span>
             {patient.bedNo && (
-              <span>Unit: {labelForScope(patient.bedNo, patient.careType || 'Admission')}</span>
+              <span>
+                Unit:{' '}
+                {labelForScope(
+                  patient.bedNo,
+                  patient.careType || 'Admission',
+                  patient.acType
+                )}
+              </span>
             )}
             {patient.billNo && <span>Bill: {patient.billNo}</span>}
           </div>
@@ -719,20 +1038,38 @@ export default function PatientDetail() {
               )}
               {!editing && !isClinician && (
                 <>
-                  <button
-                    type="button"
-                    className="btn btn-outline btn-sm"
-                    onClick={() => printDocument('simple')}
-                  >
-                    Simple Bill
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-outline btn-sm"
-                    onClick={() => printDocument('detailed')}
-                  >
-                    Detailed Bill
-                  </button>
+                  {advance > 0 && (
+                    <SlipActionMenu
+                      label="Advance Slip"
+                      busy={sendingWhatsApp}
+                      onPrint={() => printDocument('advance')}
+                      onWhatsApp={
+                        canManageBilling
+                          ? () => handleSendWhatsApp('advance')
+                          : undefined
+                      }
+                    />
+                  )}
+                  <SlipActionMenu
+                    label="Simple Bill"
+                    busy={sendingWhatsApp}
+                    onPrint={() => printDocument('simple')}
+                    onWhatsApp={
+                      canManageBilling
+                        ? () => handleSendWhatsApp('simple')
+                        : undefined
+                    }
+                  />
+                  <SlipActionMenu
+                    label="Detailed Bill"
+                    busy={sendingWhatsApp}
+                    onPrint={() => printDocument('detailed')}
+                    onWhatsApp={
+                      canManageBilling
+                        ? () => handleSendWhatsApp('detailed')
+                        : undefined
+                    }
+                  />
                 </>
               )}
               {!isAdmitted && !editing && !isClinician && (
@@ -785,6 +1122,7 @@ export default function PatientDetail() {
                             ...f,
                             bedNo: unit,
                             careType: subs.includes(f.careType) ? f.careType : subs[0],
+                            acType: unit === 'Ward' ? f.acType || 'With AC' : '',
                           }));
                         }}
                       >
@@ -808,6 +1146,25 @@ export default function PatientDetail() {
                     ))}
                   </div>
                 </div>
+                {editForm.bedNo === 'Ward' && (
+                  <div className="form-group">
+                    <label className="form-label">
+                      AC option <span className="req">*</span>
+                    </label>
+                    <div className="filter-pills gender-toggle" role="group" aria-label="AC option">
+                      {acTypesForUnit('Ward').map((ac) => (
+                        <button
+                          key={ac}
+                          type="button"
+                          className={`pill ${editForm.acType === ac ? 'active' : ''}`}
+                          onClick={() => setEditForm((f) => ({ ...f, acType: ac }))}
+                        >
+                          {ac}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="form-group">
                   <label className="form-label">
                     Name <span className="req">*</span>
@@ -866,6 +1223,18 @@ export default function PatientDetail() {
                     onChange={setEdit('age')}
                     min="0"
                     required
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Weight (kg)</label>
+                  <input
+                    type="number"
+                    className="form-input"
+                    value={editForm.weight}
+                    onChange={setEdit('weight')}
+                    min="0"
+                    step="0.01"
+                    placeholder="Weight in kg"
                   />
                 </div>
                 <div className="form-group">
@@ -957,19 +1326,41 @@ export default function PatientDetail() {
                 )}
                 <div className="form-group">
                   <label className="form-label">Duty R.M.O.</label>
-                  <input
-                    className="form-input"
+                  <select
+                    className="form-select"
                     value={editForm.dutyRmo}
                     onChange={setEdit('dutyRmo')}
-                  />
+                  >
+                    <option value="">Select R.M.O.</option>
+                    {editForm.dutyRmo &&
+                      !rmoList.some((s) => s.name === editForm.dutyRmo) && (
+                        <option value={editForm.dutyRmo}>{editForm.dutyRmo}</option>
+                      )}
+                    {rmoList.map((s) => (
+                      <option key={s._id} value={s.name}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div className="form-group">
                   <label className="form-label">Consultant</label>
-                  <input
-                    className="form-input"
+                  <select
+                    className="form-select"
                     value={editForm.consultant}
                     onChange={setEdit('consultant')}
-                  />
+                  >
+                    <option value="">Select consultant</option>
+                    {editForm.consultant &&
+                      !consultantList.some((s) => s.name === editForm.consultant) && (
+                        <option value={editForm.consultant}>{editForm.consultant}</option>
+                      )}
+                    {consultantList.map((s) => (
+                      <option key={s._id} value={s.name}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div className="form-group span-2">
                   <label className="form-label">Diagnosis</label>
@@ -1054,7 +1445,11 @@ export default function PatientDetail() {
                   <span className="info-label">Unit</span>
                   <span className="info-value">
                     {patient.bedNo
-                      ? labelForScope(patient.bedNo, patient.careType || 'Admission')
+                      ? labelForScope(
+                          patient.bedNo,
+                          patient.careType || 'Admission',
+                          patient.acType
+                        )
                       : '—'}
                   </span>
                 </div>
@@ -1062,6 +1457,14 @@ export default function PatientDetail() {
                   <span className="info-label">Age</span>
                   <span className="info-value">
                     {patient.age} {patient.ageUnit || 'Years'}
+                  </span>
+                </div>
+                <div className="info-item">
+                  <span className="info-label">Weight</span>
+                  <span className="info-value">
+                    {patient.weight != null && patient.weight !== ''
+                      ? `${patient.weight} kg`
+                      : '—'}
                   </span>
                 </div>
                 <div className="info-item">
@@ -1108,13 +1511,21 @@ export default function PatientDetail() {
                   </span>
                 </div>
                 {!isAdmitted && (
-                  <div className="info-item">
-                    <span className="info-label">Discharged</span>
-                    <span className="info-value">
-                      {formatDate(patient.dischargeDate)}
-                      {patient.dischargeTime ? ` · ${patient.dischargeTime}` : ''}
-                    </span>
-                  </div>
+                  <>
+                    <div className="info-item">
+                      <span className="info-label">Discharged</span>
+                      <span className="info-value">
+                        {formatDate(patient.dischargeDate)}
+                        {patient.dischargeTime ? ` · ${patient.dischargeTime}` : ''}
+                      </span>
+                    </div>
+                    <div className="info-item">
+                      <span className="info-label">Discharge Type</span>
+                      <span className="info-value">
+                        {dischargeTypeLabel(patient.dischargeType) || '—'}
+                      </span>
+                    </div>
+                  </>
                 )}
                 <div className="info-item">
                   <span className="info-label">Duty R.M.O.</span>
@@ -1301,6 +1712,7 @@ export default function PatientDetail() {
           >
             Daily charges auto-count by 12:00 PM noon cutoff
             {patient.billableDays ? ` · Current billable days: ${patient.billableDays}` : ''}.
+            Select multiple charges to stop or activate together.
           </p>
 
           {(patient.charges || []).length === 0 ? (
@@ -1308,54 +1720,142 @@ export default function PatientDetail() {
               <p>No charges added yet</p>
             </div>
           ) : (
-            <div className="charges-table-wrap">
-              <table className="charges-table">
-                <thead>
-                  <tr>
-                    <th>Particulars</th>
-                    <th>Qty / Rate</th>
-                    <th style={{ textAlign: 'right' }}>Amount</th>
-                    {canManageBilling && isAdmitted && (
-                      <th className="actions-col no-print" />
-                    )}
-                  </tr>
-                </thead>
-                <tbody>
-                  {patient.charges.map((c) => (
-                    <tr key={c._id}>
-                      <td>
-                        <div style={{ fontWeight: 500 }}>{c.particular}</div>
-                        {c.note && (
-                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                            {c.note}
-                          </div>
-                        )}
-                      </td>
-                      <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                        {c.ratePerDay > 0
-                          ? `${c.days || 0} days @ Rs. ${c.ratePerDay}/day`
-                          : c.days > 0
-                            ? `${c.days} days`
-                            : '—'}
-                      </td>
-                      <td className="amount">{formatMoney(c.amount)}</td>
+            <>
+              {canManageBilling && isAdmitted && (
+                <div
+                  className="toolbar no-print"
+                  style={{ marginBottom: '0.75rem', gap: '0.5rem', flexWrap: 'wrap' }}
+                >
+                  <label
+                    className="charge-check-label"
+                    style={{ margin: 0, gap: '0.4rem', cursor: 'pointer' }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={
+                        (patient.charges || []).length > 0 &&
+                        selectedChargeIds.length === (patient.charges || []).length
+                      }
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedChargeIds((patient.charges || []).map((c) => c._id));
+                        } else {
+                          setSelectedChargeIds([]);
+                        }
+                      }}
+                    />
+                    <span style={{ fontSize: '0.85rem' }}>
+                      {selectedChargeIds.length
+                        ? `${selectedChargeIds.length} selected`
+                        : 'Select all'}
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    disabled={bulkChargeBusy || selectedChargeIds.length === 0}
+                    onClick={handleBatchStopCharges}
+                  >
+                    Stop selected
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    disabled={bulkChargeBusy || selectedChargeIds.length === 0}
+                    onClick={handleBatchResumeCharges}
+                  >
+                    Activate selected
+                  </button>
+                </div>
+              )}
+              <div className="charges-table-wrap">
+                <table className="charges-table">
+                  <thead>
+                    <tr>
                       {canManageBilling && isAdmitted && (
-                        <td className="actions-col no-print">
-                          <button
-                            type="button"
-                            className="btn-icon"
-                            title="Remove"
-                            onClick={() => handleRemoveCharge(c._id)}
-                          >
-                            ×
-                          </button>
-                        </td>
+                        <th className="no-print" style={{ width: 36 }} />
+                      )}
+                      <th>Particulars</th>
+                      <th>Qty / Rate</th>
+                      <th style={{ textAlign: 'right' }}>Amount</th>
+                      {canManageBilling && isAdmitted && (
+                        <th className="actions-col no-print" />
                       )}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {patient.charges.map((c) => (
+                      <tr key={c._id}>
+                        {canManageBilling && isAdmitted && (
+                          <td className="no-print">
+                            <input
+                              type="checkbox"
+                              checked={selectedChargeIds.includes(c._id)}
+                              onChange={() => toggleChargeSelect(c._id)}
+                              aria-label={`Select ${c.particular}`}
+                            />
+                          </td>
+                        )}
+                        <td>
+                          <div style={{ fontWeight: 500 }}>
+                            {c.particular}
+                            {c.stoppedAt && (
+                              <span className="auto-badge" style={{ marginLeft: '0.35rem' }}>
+                                Stopped
+                              </span>
+                            )}
+                          </div>
+                          {c.note && (
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                              {c.note}
+                            </div>
+                          )}
+                        </td>
+                        <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                          {c.ratePerDay > 0
+                            ? `${c.days || 0} days @ Rs. ${c.ratePerDay}/day`
+                            : c.days > 0
+                              ? `${c.days} days`
+                              : '—'}
+                        </td>
+                        <td className="amount">{formatMoney(c.amount)}</td>
+                        {canManageBilling && isAdmitted && (
+                          <td className="actions-col no-print">
+                            <div
+                              style={{
+                                display: 'flex',
+                                gap: '0.35rem',
+                                justifyContent: 'flex-end',
+                                alignItems: 'center',
+                              }}
+                            >
+                              {canResumeCharge(c) && (
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-sm"
+                                  title="Activate again"
+                                  onClick={() => handleResumeCharge(c)}
+                                >
+                                  Activate
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="btn-icon"
+                                title={isActiveDailyCharge(c) ? 'Stop charge' : 'Remove'}
+                                onClick={() => handleRemoveCharge(c)}
+                              >
+                                ×
+                              </button>
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
 
           <div className="bill-summary">
@@ -1363,6 +1863,21 @@ export default function PatientDetail() {
               <span>Total Charges</span>
               <span>{formatMoney(total)}</span>
             </div>
+            {discountAmount > 0 && (
+              <div className="bill-row">
+                <span>
+                  Less: Discount
+                  {discountLabel(patient) ? ` (${discountLabel(patient)})` : ''}
+                </span>
+                <span>- {formatMoney(discountAmount)}</span>
+              </div>
+            )}
+            {discountAmount > 0 && (
+              <div className="bill-row">
+                <span>Net Charges</span>
+                <span>{formatMoney(netTotal)}</span>
+              </div>
+            )}
             {advance > 0 && (
               <div className="bill-row">
                 <span>Less: Advance</span>
@@ -1377,6 +1892,69 @@ export default function PatientDetail() {
               <span>{balance >= 0 ? 'Balance Due' : 'Refund / Credit'}</span>
               <span>{formatMoney(Math.abs(balance))}</span>
             </div>
+            {canManageBilling && (
+              <div className="bill-row discount-row no-print">
+                <span>Discount bill</span>
+                <div className="discount-controls">
+                  <select
+                    className="form-input discount-type-select"
+                    value={discountType}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setDiscountType(next);
+                      if (!next) setDiscountValue('');
+                    }}
+                  >
+                    <option value="">No discount</option>
+                    <option value="percentage">Percentage (%)</option>
+                    <option value="fixed">Fixed amount (Rs.)</option>
+                  </select>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    className="form-input amount-received-input"
+                    value={discountValue}
+                    disabled={!discountType}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === '' || /^\d*\.?\d*$/.test(v)) {
+                        setDiscountValue(v);
+                      }
+                    }}
+                    placeholder={
+                      discountType === 'percentage'
+                        ? '%'
+                        : discountType === 'fixed'
+                          ? 'Rs.'
+                          : '—'
+                    }
+                  />
+                  {draftDiscountAmount > 0 && (
+                    <span className="discount-preview">
+                      = {formatMoney(draftDiscountAmount)}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={handleSaveDiscount}
+                    disabled={savingDiscount}
+                  >
+                    {savingDiscount ? '...' : 'Apply'}
+                  </button>
+                  {(patient.discountType || discountType) && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={handleClearDiscount}
+                      disabled={savingDiscount}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
             {canManageBilling && (
               <div className="bill-row amount-received-row no-print">
                 <span>Record payment (Rs.)</span>
@@ -1423,6 +2001,7 @@ export default function PatientDetail() {
                           <th>Date & time</th>
                           <th>Note</th>
                           <th style={{ textAlign: 'right' }}>Amount</th>
+                          <th className="actions-col" />
                         </tr>
                       </thead>
                       <tbody>
@@ -1439,6 +2018,18 @@ export default function PatientDetail() {
                                 {p.note || '—'}
                               </td>
                               <td className="amount">{formatMoney(p.amount)}</td>
+                              <td className="actions-col">
+                                <SlipActionMenu
+                                  label="Receipt"
+                                  busy={sendingWhatsApp}
+                                  onPrint={() => printPaymentReceipt(p)}
+                                  onWhatsApp={
+                                    canManageBilling
+                                      ? () => handleSendWhatsApp('payment', p._id)
+                                      : undefined
+                                  }
+                                />
+                              </td>
                             </tr>
                           ))}
                       </tbody>
@@ -1591,6 +2182,27 @@ export default function PatientDetail() {
                 <span>Total Charges</span>
                 <span>{formatMoney(total)}</span>
               </div>
+              {discountAmount > 0 && (
+                <div className="bill-row">
+                  <span>
+                    Less: Discount
+                    {discountLabel(patient) ? ` (${discountLabel(patient)})` : ''}
+                  </span>
+                  <span>- {formatMoney(discountAmount)}</span>
+                </div>
+              )}
+              {discountAmount > 0 && (
+                <div className="bill-row">
+                  <span>Net Charges</span>
+                  <span>{formatMoney(netTotal)}</span>
+                </div>
+              )}
+              {advance > 0 && (
+                <div className="bill-row">
+                  <span>Less: Advance</span>
+                  <span>- {formatMoney(advance)}</span>
+                </div>
+              )}
               <div className="bill-row">
                 <span>Already Received</span>
                 <span>- {formatMoney(amountReceived)}</span>
@@ -1666,6 +2278,24 @@ export default function PatientDetail() {
                     <option value="">Select</option>
                     <option value="Co.">Co.</option>
                     <option value="Pvt.">Pvt.</option>
+                  </select>
+                </div>
+                <div className="form-group span-2">
+                  <label className="form-label">
+                    Discharge Type <span className="req">*</span>
+                  </label>
+                  <select
+                    className="form-select"
+                    value={dischargeForm.dischargeType}
+                    onChange={setDischargeField('dischargeType')}
+                    required
+                  >
+                    <option value="">Select discharge type</option>
+                    {DISCHARGE_TYPES.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>
@@ -2082,6 +2712,8 @@ export default function PatientDetail() {
 
       {!isClinician && (
         <>
+          <AdvancePaymentSlip patient={patient} />
+          <PaymentReceiptSlip patient={patient} payment={receiptPayment} />
           <PatientBillPrint patient={patient} mode="simple" />
           <PatientBillPrint patient={patient} mode="detailed" />
           {!isAdmitted && <DischargeSummaryPrint patient={patient} />}

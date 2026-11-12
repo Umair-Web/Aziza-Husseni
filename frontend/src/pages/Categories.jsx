@@ -7,6 +7,7 @@ const emptyForm = {
   name: '',
   ratePerDay: '',
   autoAttach: false,
+  acAddon: false,
   unit: 'NICU',
   subType: 'Admission',
 };
@@ -53,6 +54,7 @@ export default function Categories() {
       name: cat.name,
       ratePerDay: String(cat.ratePerDay ?? 0),
       autoAttach: Boolean(cat.autoAttach),
+      acAddon: cat.unit === 'Ward' && cat.acType === 'With AC',
       unit: cat.unit || 'NICU',
       subType: cat.subType || 'Admission',
     });
@@ -67,6 +69,7 @@ export default function Categories() {
       ...f,
       unit,
       subType: subs.includes(f.subType) ? f.subType : subs[0],
+      acAddon: unit === 'Ward' ? f.acAddon : false,
     }));
   };
 
@@ -82,6 +85,7 @@ export default function Categories() {
         autoAttach: Boolean(form.autoAttach),
         unit: form.unit,
         subType: form.subType,
+        acAddon: form.unit === 'Ward' ? Boolean(form.acAddon) : false,
       };
 
       if (editingId) {
@@ -145,8 +149,8 @@ export default function Categories() {
   }, [categories, filterUnit, filterSubType]);
 
   const filterSubOptions = subTypesForUnit(filterUnit);
-
   const autoCount = filtered.filter((c) => c.autoAttach).length;
+  const scopeLabel = labelForScope(form.unit, form.subType);
 
   return (
     <main className="page page-wide">
@@ -221,6 +225,24 @@ export default function Categories() {
                 placeholder="0"
               />
             </div>
+            {form.unit === 'Ward' && (
+              <div className="form-group span-2">
+                <label className="charge-check-label auto-attach-form-check">
+                  <input
+                    type="checkbox"
+                    checked={form.acAddon}
+                    onChange={(e) => setForm((f) => ({ ...f, acAddon: e.target.checked }))}
+                  />
+                  <span>
+                    <strong>AC add-on (With AC only)</strong>
+                    <span className="charge-attach-hint" style={{ display: 'block', margin: 0 }}>
+                      Shared Ward charges apply to both With AC and Without AC. Check this for
+                      charges like AC Charges that only apply when With AC is selected.
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
             <div className="form-group span-2">
               <label className="charge-check-label auto-attach-form-check">
                 <input
@@ -231,7 +253,8 @@ export default function Categories() {
                 <span>
                   <strong>Auto-add on patient registration</strong>
                   <span className="charge-attach-hint" style={{ display: 'block', margin: 0 }}>
-                    Pre-selected only for patients in {labelForScope(form.unit, form.subType)}.
+                    Pre-selected for patients in {scopeLabel}
+                    {form.unit === 'Ward' && form.acAddon ? ' when With AC is selected' : ''}.
                   </span>
                 </span>
               </label>
@@ -258,8 +281,8 @@ export default function Categories() {
           <span className="auto-count-pill">{autoCount} auto-add</span>
         </div>
         <p className="charge-attach-hint">
-          Same charge name can have different rates under different unit / sub-type (e.g. NICU
-          Admission vs NICU Observation).
+          Ward Admission uses the same charge types for With AC and Without AC. Mark a row as AC
+          add-on to attach it only when With AC is selected.
         </p>
 
         <div className="toolbar" style={{ marginBottom: '1rem' }}>
@@ -307,6 +330,7 @@ export default function Categories() {
                   <th>Unit</th>
                   <th>Sub-type</th>
                   <th>Charge Name</th>
+                  {filterUnit === 'Ward' && <th>Type</th>}
                   <th style={{ textAlign: 'right' }}>Rate / Day</th>
                   <th style={{ textAlign: 'center' }}>Auto-add</th>
                   <th className="actions-col" style={{ width: 110 }}>
@@ -320,6 +344,15 @@ export default function Categories() {
                     <td>{cat.unit || '—'}</td>
                     <td>{cat.subType || '—'}</td>
                     <td style={{ fontWeight: 500 }}>{cat.name}</td>
+                    {filterUnit === 'Ward' && (
+                      <td>
+                        {cat.acType === 'With AC' ? (
+                          <span className="auto-badge">AC add-on</span>
+                        ) : (
+                          'Shared'
+                        )}
+                      </td>
+                    )}
                     <td className="amount">
                       Rs. {Number(cat.ratePerDay || 0).toLocaleString('en-PK')}
                     </td>

@@ -1,3 +1,5 @@
+import { netChargesTotal } from './billingDiscount';
+
 /** Sum of payment history, or legacy single amountReceived. */
 export function totalAmountReceived(patient) {
   if (!patient) return 0;
@@ -8,16 +10,13 @@ export function totalAmountReceived(patient) {
   return Number(patient.amountReceived) || 0;
 }
 
-/** True when charge total is not fully covered by advance + amount received. */
+/** True when net bill (after discount) is not fully covered by advance + amount received. */
 export function isUnpaidBill(patient) {
   if (!patient) return false;
-  const total = (patient.charges || []).reduce(
-    (sum, c) => sum + (Number(c.amount) || 0),
-    0
-  );
-  if (total <= 0) return false;
+  const net = netChargesTotal(patient);
+  if (net <= 0) return false;
   const advance = Number(patient.advance) || 0;
   const received = totalAmountReceived(patient);
   const paid = advance + received;
-  return paid + 0.009 < total;
+  return paid + 0.009 < net;
 }

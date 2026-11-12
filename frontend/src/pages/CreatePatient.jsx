@@ -3,7 +3,14 @@ import { Link, useNavigate } from 'react-router-dom';
 import api from '../api';
 import { useAuth } from '../context/AuthContext';
 import { combineDateAndTime, countBillableDays } from '../utils/billingDays';
-import { UNITS, subTypesForUnit, labelForScope } from '../utils/chargeUnits';
+import {
+  UNITS,
+  AC_TYPES,
+  subTypesForUnit,
+  acTypesForUnit,
+  categoryMatchesPatient,
+  labelForScope,
+} from '../utils/chargeUnits';
 
 const today = () => new Date().toISOString().slice(0, 10);
 const nowTime = () => {
@@ -14,11 +21,13 @@ const nowTime = () => {
 const emptyForm = () => ({
   bedNo: 'NICU',
   careType: 'Admission',
+  acType: '',
   name: '',
   relativeOf: '',
   gender: 'Male',
   age: '',
   ageUnit: 'Years',
+  weight: '',
   address: '',
   telNo: '',
   referralType: '',
@@ -44,6 +53,8 @@ export default function CreatePatient() {
   const [success, setSuccess] = useState('');
   const [nextRegNo, setNextRegNo] = useState('Loading...');
   const [referrals, setReferrals] = useState([]);
+  const [rmoList, setRmoList] = useState([]);
+  const [consultantList, setConsultantList] = useState([]);
   const [allCategories, setAllCategories] = useState([]);
   const [selectedCharges, setSelectedCharges] = useState([]);
   const [extraCharge, setExtraCharge] = useState('');
@@ -61,32 +72,40 @@ export default function CreatePatient() {
       .catch(() => setReferrals([]));
 
     api
+      .get('/clinical-staff')
+      .then((res) => {
+        const list = res.data || [];
+        setRmoList(list.filter((s) => s.role === 'rmo'));
+        setConsultantList(list.filter((s) => s.role === 'consultant'));
+      })
+      .catch(() => {
+        setRmoList([]);
+        setConsultantList([]);
+      });
+
+    api
       .get('/charge-categories')
       .then((res) => setAllCategories(res.data || []))
       .catch(() => setAllCategories([]));
   }, []);
 
-  const scopedCategories = allCategories.filter(
-    (c) =>
-      form.bedNo &&
-      form.careType &&
-      c.unit === form.bedNo &&
-      c.subType === form.careType
+  const scopedCategories = allCategories.filter((c) =>
+    categoryMatchesPatient(c, form.bedNo, form.careType, form.acType)
   );
   const autoAttachNames = scopedCategories.filter((c) => c.autoAttach).map((c) => c.name);
 
   useEffect(() => {
-    if (!form.bedNo || !form.careType) {
+    if (!form.bedNo || !form.careType || (form.bedNo === 'Ward' && !form.acType)) {
       setSelectedCharges([]);
       return;
     }
-    const scoped = allCategories.filter(
-      (c) => c.unit === form.bedNo && c.subType === form.careType
+    const scoped = allCategories.filter((c) =>
+      categoryMatchesPatient(c, form.bedNo, form.careType, form.acType)
     );
     const autoNames = scoped.filter((c) => c.autoAttach).map((c) => c.name);
     setSelectedCharges(autoNames);
     setExtraCharge('');
-  }, [form.bedNo, form.careType, allCategories]);
+  }, [form.bedNo, form.careType, form.acType, allCategories]);
 
   const set = (field) => (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
 
@@ -97,6 +116,7 @@ export default function CreatePatient() {
       bedNo: unit,
       // PICU / Ward only have Admission — always preselect it
       careType: unit === 'NICU' && subs.includes(f.careType) ? f.careType : 'Admission',
+      acType: unit === 'Ward' ? f.acType || 'With AC' : '',
     }));
   };
 
@@ -129,11 +149,16 @@ export default function CreatePatient() {
       setError('Please select Admission or Observation');
       return;
     }
+    if (form.bedNo === 'Ward' && !AC_TYPES.includes(form.acType)) {
+      setError('Please select With AC or Without AC for Ward');
+      return;
+    }
     setLoading(true);
     try {
       const payload = {
         ...form,
         age: Number(form.age),
+        weight: form.weight === '' ? null : Number(form.weight),
         advance: Number(form.advance) || 0,
         chargeCategories: selectedCharges,
       };
@@ -236,6 +261,30 @@ export default function CreatePatient() {
                   </p>
                 )}
               </div>
+              {form.bedNo === 'Ward' && (
+                <div className="form-group">
+                  <label className="form-label">
+                    AC option <span className="req">*</span>
+                  </label>
+                  <div className="filter-pills gender-toggle" role="group" aria-label="AC option">
+                    {acTypesForUnit('Ward').map((ac) => (
+                      <button
+                        key={ac}
+                        type="button"
+                        className={`pill ${form.acType === ac ? 'active' : ''}`}
+                        onClick={() => setForm((f) => ({ ...f, acType: ac }))}
+                      >
+                        {ac}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="charge-attach-hint" style={{ margin: '0.35rem 0 0' }}>
+                    {form.acType === 'With AC'
+                      ? 'Same Ward charges as Without AC, plus AC Charges add-on.'
+                      : 'Same Ward charges as With AC, without the AC Charges add-on.'}
+                  </p>
+                </div>
+              )}
               <div className="form-group">
                 <label className="form-label">IPD No.</label>
                 <input
@@ -311,6 +360,18 @@ export default function CreatePatient() {
                 />
               </div>
               <div className="form-group">
+                <label className="form-label">Weight (kg)</label>
+                <input
+                  type="number"
+                  className="form-input"
+                  value={form.weight}
+                  onChange={set('weight')}
+                  min="0"
+                  step="0.01"
+                  placeholder="Weight in kg"
+                />
+              </div>
+              <div className="form-group">
                 <label className="form-label">Tel. No.</label>
                 <input
                   type="tel"
@@ -363,7 +424,12 @@ export default function CreatePatient() {
 
           <div className="card">
             <div className="section-label">
-              Charge Categories — {labelForScope(form.bedNo, form.careType)}
+              Charge Categories —{' '}
+              {labelForScope(
+                form.bedNo,
+                form.careType,
+                form.bedNo === 'Ward' ? form.acType : ''
+              )}
             </div>
             <p className="charge-attach-hint">
               Auto-add charges for this unit / care type are selected below. Use the dropdown to
@@ -384,6 +450,9 @@ export default function CreatePatient() {
                         {name}
                         {autoAttachNames.includes(name) && (
                           <span className="auto-badge"> Auto</span>
+                        )}
+                        {scopedCategories.find((c) => c.name === name)?.acType === 'With AC' && (
+                          <span className="auto-badge"> AC add-on</span>
                         )}
                       </span>
                       <span className="charge-check-meta">
@@ -478,15 +547,33 @@ export default function CreatePatient() {
               </div>
               <div className="form-group">
                 <label className="form-label">Name of Duty R.M.O.</label>
-                <input className="form-input" value={form.dutyRmo} onChange={set('dutyRmo')} />
+                <select
+                  className="form-select"
+                  value={form.dutyRmo}
+                  onChange={set('dutyRmo')}
+                >
+                  <option value="">Select R.M.O.</option>
+                  {rmoList.map((s) => (
+                    <option key={s._id} value={s.name}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div className="form-group">
                 <label className="form-label">Name of Consultant</label>
-                <input
-                  className="form-input"
+                <select
+                  className="form-select"
                   value={form.consultant}
                   onChange={set('consultant')}
-                />
+                >
+                  <option value="">Select consultant</option>
+                  {consultantList.map((s) => (
+                    <option key={s._id} value={s.name}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div className="form-group span-2">
                 <label className="form-label">Reason For Admission / Diagnosis</label>

@@ -3,3 +3,9 @@ node_modules/
 *.log
 .DS_Store
 dist/
+
+backend/.wwebjs_auth/
+backend/.wwebjs_cache/
+backend/.open-wa/
+backend/clinic.data.json
+

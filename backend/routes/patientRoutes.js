@@ -14,6 +14,9 @@ const {
   addCharge,
   updateCharge,
   removeCharge,
+  resumeCharge,
+  batchStopCharges,
+  batchResumeCharges,
   addPayment,
   dischargePatient,
   getParticulars,
@@ -21,6 +24,7 @@ const {
   getEarnings,
   getNextRegNo,
 } = require('../controllers/patientController');
+const { sendPatientSlip } = require('../controllers/whatsappController');
 
 router.use(protect);
 
@@ -34,6 +38,18 @@ router.get('/:id', getPatient);
 router.put('/:id', updatePatient);
 router.delete('/:id', denyRegistration, denyClinicianRestricted, deletePatient);
 router.post('/:id/charges', denyRegistration, denyClinicianRestricted, addCharge);
+router.post(
+  '/:id/charges/batch-stop',
+  denyRegistration,
+  denyClinicianRestricted,
+  batchStopCharges
+);
+router.post(
+  '/:id/charges/batch-resume',
+  denyRegistration,
+  denyClinicianRestricted,
+  batchResumeCharges
+);
 router.put(
   '/:id/charges/:chargeId',
   denyRegistration,
@@ -46,7 +62,19 @@ router.delete(
   denyClinicianRestricted,
   removeCharge
 );
+router.post(
+  '/:id/charges/:chargeId/resume',
+  denyRegistration,
+  denyClinicianRestricted,
+  resumeCharge
+);
 router.post('/:id/payments', denyRegistration, denyClinicianRestricted, addPayment);
+router.post(
+  '/:id/whatsapp-slip',
+  denyRegistration,
+  denyClinicianRestricted,
+  sendPatientSlip
+);
 router.post(
   '/:id/discharge',
   denyRegistration,

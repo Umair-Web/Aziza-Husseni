@@ -1,11 +1,18 @@
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
-const fullLinks = [
+const adminStaffLinks = [
   { to: '/', end: true, label: 'Overview' },
   { to: '/patients', end: true, label: 'Patient History' },
   { to: '/expenses', end: true, label: 'Expenses' },
   { to: '/categories', end: true, label: 'Charge Category' },
+  { to: '/referrals', end: true, label: 'Referral Types' },
+  { to: '/rmo-consultant', end: true, label: 'RMO and Consultant' },
+];
+
+const adminOnlyLinks = [
+  { to: '/user-credentials', end: true, label: 'User Credentials' },
+  { to: '/whatsapp-setup', end: true, label: 'WhatsApp Setup' },
 ];
 
 const registrationLinks = [
@@ -25,7 +32,9 @@ export default function Sidebar({ open, onClose }) {
       ? registrationLinks
       : user?.role === 'clinician'
         ? clinicianLinks
-        : fullLinks;
+        : user?.role === 'admin'
+          ? [...adminStaffLinks, ...adminOnlyLinks]
+          : adminStaffLinks;
 
   return (
     <>

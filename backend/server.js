@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const connectDB = require('./config/db');
 const User = require('./models/User');
+const Patient = require('./models/Patient');
 const Referral = require('./models/Referral');
 const ChargeCategory = require('./models/ChargeCategory');
 const Terminology = require('./models/Terminology');
@@ -13,6 +14,7 @@ const chargeCategoryRoutes = require('./routes/chargeCategoryRoutes');
 const expenseCategoryRoutes = require('./routes/expenseCategoryRoutes');
 const expenseRoutes = require('./routes/expenseRoutes');
 const terminologyRoutes = require('./routes/terminologyRoutes');
+const clinicalStaffRoutes = require('./routes/clinicalStaffRoutes');
 
 const DEFAULT_MEDICINE_TIMINGS = [
   '1+0+0',
@@ -59,10 +61,11 @@ const DEFAULT_CHARGE_NAMES = [
 ];
 
 const DEFAULT_CHARGE_SCOPES = [
-  { unit: 'NICU', subType: 'Admission' },
-  { unit: 'NICU', subType: 'Observation' },
-  { unit: 'PICU', subType: 'Admission' },
-  { unit: 'Ward', subType: 'Admission' },
+  { unit: 'NICU', subType: 'Admission', acType: '' },
+  { unit: 'NICU', subType: 'Observation', acType: '' },
+  { unit: 'PICU', subType: 'Admission', acType: '' },
+  // Ward Admission: shared charges for both With AC and Without AC
+  { unit: 'Ward', subType: 'Admission', acType: '' },
 ];
 
 const DEFAULT_CHARGE_CATEGORIES = DEFAULT_CHARGE_SCOPES.flatMap((scope) =>
@@ -95,12 +98,18 @@ const ensureRegistrationUser = async () => {
   });
 
   if (existing) {
-    existing.role = 'registration';
-    existing.email = email;
-    existing.username = 'user1';
-    existing.password = 'user123';
-    await existing.save();
-    console.log('Registration user ready: user1@azizahusseni.com / user123');
+    // Keep existing credentials; only ensure role/identity defaults if missing
+    let changed = false;
+    if (existing.role !== 'registration') {
+      existing.role = 'registration';
+      changed = true;
+    }
+    if (!existing.username) {
+      existing.username = 'user1';
+      changed = true;
+    }
+    if (changed) await existing.save();
+    console.log('Registration user ready:', existing.email || email);
     return;
   }
 
@@ -121,13 +130,22 @@ const ensureClinicianUser = async () => {
   });
 
   if (existing) {
-    existing.role = 'clinician';
-    existing.email = email;
-    existing.username = 'clinicain1';
-    existing.name = existing.name || 'Clinician 1';
-    existing.password = 'clinicain123';
-    await existing.save();
-    console.log('Clinician user ready: clinicain1@azizahusseni.com / clinicain123');
+    // Keep existing credentials; only ensure role/identity defaults if missing
+    let changed = false;
+    if (existing.role !== 'clinician') {
+      existing.role = 'clinician';
+      changed = true;
+    }
+    if (!existing.username) {
+      existing.username = 'clinicain1';
+      changed = true;
+    }
+    if (!existing.name) {
+      existing.name = 'Clinician 1';
+      changed = true;
+    }
+    if (changed) await existing.save();
+    console.log('Clinician user ready:', existing.email || email);
     return;
   }
 
@@ -158,13 +176,21 @@ const ensureDefaultTimings = async () => {
 };
 
 const ensureChargeCategories = async () => {
-  // Drop legacy unique-on-name index if present (name is unique per unit+subType now)
+  // Drop legacy unique-on-name index if present (name is unique per unit+subType+acType now)
   try {
     await ChargeCategory.collection.dropIndex('name_1');
     console.log('Dropped legacy ChargeCategory name_1 index');
   } catch (err) {
     if (err.code !== 27 && err.codeName !== 'IndexNotFound') {
       // ignore missing index; log other issues lightly
+    }
+  }
+  try {
+    await ChargeCategory.collection.dropIndex('name_1_unit_1_subType_1');
+    console.log('Dropped legacy ChargeCategory name_1_unit_1_subType_1 index');
+  } catch (err) {
+    if (err.code !== 27 && err.codeName !== 'IndexNotFound') {
+      // ignore missing index
     }
   }
 
@@ -177,6 +203,39 @@ const ensureChargeCategories = async () => {
     { $or: [{ subType: { $exists: false } }, { subType: null }, { subType: '' }] },
     { $set: { subType: 'Admission' } }
   );
+  await ChargeCategory.updateMany(
+    {
+      unit: { $ne: 'Ward' },
+      $or: [{ acType: { $exists: false } }, { acType: null }],
+    },
+    { $set: { acType: '' } }
+  );
+
+  // Ward: shared charges for both AC options; only "AC Charges" stays as With-AC add-on
+  await ChargeCategory.updateMany(
+    {
+      unit: 'Ward',
+      name: { $ne: 'AC Charges' },
+      acType: { $in: ['With AC', 'Without AC'] },
+    },
+    { $set: { acType: '' } }
+  );
+  await ChargeCategory.updateMany(
+    {
+      unit: 'Ward',
+      name: 'AC Charges',
+    },
+    { $set: { acType: 'With AC' } }
+  );
+  await ChargeCategory.updateMany(
+    {
+      unit: 'Ward',
+      $or: [{ acType: { $exists: false } }, { acType: null }],
+    },
+    { $set: { acType: '' } }
+  );
+  // Drop any old Without-AC-only duplicates (no longer used)
+  await ChargeCategory.deleteMany({ unit: 'Ward', acType: 'Without AC' });
 
   try {
     await ChargeCategory.syncIndexes();
@@ -188,8 +247,16 @@ const ensureChargeCategories = async () => {
   const existingCount = await ChargeCategory.countDocuments();
   if (existingCount === 0) {
     await ChargeCategory.insertMany(DEFAULT_CHARGE_CATEGORIES);
+    await ChargeCategory.create({
+      name: 'AC Charges',
+      unit: 'Ward',
+      subType: 'Admission',
+      acType: 'With AC',
+      ratePerDay: 2000,
+      autoAttach: true,
+    });
     console.log(
-      `Seeded ${DEFAULT_CHARGE_CATEGORIES.length} default charge categories`
+      `Seeded ${DEFAULT_CHARGE_CATEGORIES.length + 1} default charge categories`
     );
     return;
   }
@@ -198,12 +265,19 @@ const ensureChargeCategories = async () => {
   const source = await ChargeCategory.find({
     unit: 'NICU',
     subType: 'Admission',
+    acType: '',
   }).lean();
   if (!source.length) return;
 
   for (const scope of DEFAULT_CHARGE_SCOPES) {
-    if (scope.unit === 'NICU' && scope.subType === 'Admission') continue;
-    const count = await ChargeCategory.countDocuments(scope);
+    if (scope.unit === 'NICU' && scope.subType === 'Admission' && !scope.acType) {
+      continue;
+    }
+    const count = await ChargeCategory.countDocuments({
+      unit: scope.unit,
+      subType: scope.subType,
+      acType: scope.acType || '',
+    });
     if (count > 0) continue;
     await ChargeCategory.insertMany(
       source.map((item) => ({
@@ -212,10 +286,53 @@ const ensureChargeCategories = async () => {
         autoAttach: Boolean(item.autoAttach),
         unit: scope.unit,
         subType: scope.subType,
+        acType: scope.acType || '',
       }))
     );
     console.log(`Cloned charge categories to ${scope.unit} ${scope.subType}`);
   }
+
+  // Ensure Ward has AC Charges as a With-AC add-on
+  const wardAcCount = await ChargeCategory.countDocuments({
+    unit: 'Ward',
+    subType: 'Admission',
+    name: 'AC Charges',
+    acType: 'With AC',
+  });
+  if (wardAcCount === 0) {
+    const anyWard = await ChargeCategory.countDocuments({
+      unit: 'Ward',
+      subType: 'Admission',
+    });
+    if (anyWard > 0) {
+      await ChargeCategory.create({
+        name: 'AC Charges',
+        unit: 'Ward',
+        subType: 'Admission',
+        acType: 'With AC',
+        ratePerDay: 2000,
+        autoAttach: true,
+      });
+      console.log('Added Ward Admission AC Charges add-on');
+    }
+  }
+};
+
+const ensurePatientAcTypes = async () => {
+  const result = await Patient.updateMany(
+    {
+      bedNo: 'Ward',
+      $or: [{ acType: { $exists: false } }, { acType: null }, { acType: '' }],
+    },
+    { $set: { acType: 'With AC' } }
+  );
+  if (result.modifiedCount > 0) {
+    console.log(`Backfilled acType=With AC on ${result.modifiedCount} Ward patient(s)`);
+  }
+  await Patient.updateMany(
+    { bedNo: { $ne: 'Ward' }, acType: { $nin: ['', null] } },
+    { $set: { acType: '' } }
+  );
 };
 
 const start = async () => {
@@ -226,22 +343,27 @@ const start = async () => {
   await ensureReferrals();
   await ensureDefaultTimings();
   await ensureChargeCategories();
+  await ensurePatientAcTypes();
 
   const app = express();
   app.use(cors());
-  app.use(express.json());
+  // Slip images (base64 PNG) for WhatsApp exceed the default 100kb limit
+  app.use(express.json({ limit: '15mb' }));
 
   app.get('/', (req, res) => {
     res.json({ message: 'Aziza Husseni Hospital Portal API' });
   });
 
   app.use('/api/auth', authRoutes);
+  app.use('/api/users', require('./routes/userRoutes'));
   app.use('/api/patients', patientRoutes);
   app.use('/api/referrals', referralRoutes);
   app.use('/api/charge-categories', chargeCategoryRoutes);
   app.use('/api/expense-categories', expenseCategoryRoutes);
   app.use('/api/expenses', expenseRoutes);
   app.use('/api/terminologies', terminologyRoutes);
+  app.use('/api/clinical-staff', clinicalStaffRoutes);
+  app.use('/api/whatsapp', require('./routes/whatsappRoutes'));
 
   app.use((err, req, res, next) => {
     console.error(err.stack);

@@ -17,6 +17,16 @@ const chargeCategorySchema = new mongoose.Schema(
       enum: ['Admission', 'Observation'],
       required: true,
     },
+    /**
+     * Ward Admission only:
+     * '' = shared charge (With AC and Without AC)
+     * 'With AC' = AC add-on (only when patient selects With AC)
+     */
+    acType: {
+      type: String,
+      enum: ['With AC', ''],
+      default: '',
+    },
     ratePerDay: {
       type: Number,
       required: true,
@@ -31,6 +41,9 @@ const chargeCategorySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-chargeCategorySchema.index({ name: 1, unit: 1, subType: 1 }, { unique: true });
+chargeCategorySchema.index(
+  { name: 1, unit: 1, subType: 1, acType: 1 },
+  { unique: true }
+);
 
 module.exports = mongoose.model('ChargeCategory', chargeCategorySchema);

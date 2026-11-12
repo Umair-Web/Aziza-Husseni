@@ -1,3 +1,5 @@
+import { dischargeTypeLabel } from '../utils/dischargeTypes';
+
 function formatDate(d) {
   if (!d) return '';
   return new Date(d).toLocaleDateString('en-GB', {
@@ -58,10 +60,18 @@ export default function DischargeSummaryPrint({ patient }) {
               <span>Reg. No.</span>
               <b>{patient.hospitalRegNo || ''}</b>
             </div>
-            <div className="dp-id-row span2">
+            <div className="dp-id-row">
               <span>Age</span>
               <b>
                 {patient.age != null ? `${patient.age} ${patient.ageUnit || ''}`.trim() : ''}
+              </b>
+            </div>
+            <div className="dp-id-row">
+              <span>Weight</span>
+              <b>
+                {patient.weight != null && patient.weight !== ''
+                  ? `${patient.weight} kg`
+                  : ''}
               </b>
             </div>
           </div>
@@ -75,9 +85,15 @@ export default function DischargeSummaryPrint({ patient }) {
         <h1>CLINICAL SUMMARY ON DISCHARGE</h1>
       </div>
 
-      <div className="dp-consultant-box">
-        <span>Consultant (Print Name)</span>
-        <b>{patient.consultant || ''}</b>
+      <div className="dp-staff-box">
+        <div>
+          <span>Consultant (Print Name)</span>
+          <b>{patient.consultant || ''}</b>
+        </div>
+        <div>
+          <span>Duty R.M.O.</span>
+          <b>{patient.dutyRmo || ''}</b>
+        </div>
       </div>
 
       <div className="dp-dates">
@@ -89,6 +105,11 @@ export default function DischargeSummaryPrint({ patient }) {
           <span>Date of Discharge</span>
           <b>{formatDate(patient.dischargeDate)}</b>
         </div>
+      </div>
+
+      <div className="dp-consultant-box">
+        <span>Discharge Type</span>
+        <b>{dischargeTypeLabel(patient.dischargeType) || patient.dischargeType || ''}</b>
       </div>
 
       <section className="dp-clinical">

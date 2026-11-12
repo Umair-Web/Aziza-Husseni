@@ -96,14 +96,15 @@ const resolveStayEnd = (patient, explicitEnd) => {
 
 /**
  * Update daily-rate charges (ratePerDay > 0) to match noon-based billable days.
- * Flat/manual charges (ratePerDay = 0) are left unchanged.
+ * Flat/manual charges (ratePerDay = 0) and stopped charges (autoDays false) are left unchanged.
+ * Active auto charges count from charge.date when set (e.g. resumed mid-stay), else admission.
  */
 const applyBillableDaysToPatient = (patient, explicitEnd) => {
-  const start =
+  const admissionStart =
     combineDateAndTime(patient.admissionDate, patient.admissionTime) ||
     (patient.admissionDate ? new Date(patient.admissionDate) : null);
   const end = resolveStayEnd(patient, explicitEnd);
-  const days = countBillableDays(start, end);
+  const days = countBillableDays(admissionStart, end);
 
   let changed = false;
   if (!Array.isArray(patient.charges)) {
@@ -113,12 +114,27 @@ const applyBillableDaysToPatient = (patient, explicitEnd) => {
   for (const charge of patient.charges) {
     const rate = Number(charge.ratePerDay) || 0;
     if (rate <= 0) continue;
-    // Manually added charges keep their own days
+    // Stopped / manual charges keep their own days
     if (charge.autoDays === false) continue;
 
-    const amount = days * rate;
-    if (Number(charge.days) !== days || Number(charge.amount) !== amount) {
-      charge.days = days;
+    let chargeStart = admissionStart;
+    if (charge.date) {
+      const fromDate = new Date(charge.date);
+      if (
+        !Number.isNaN(fromDate.getTime()) &&
+        admissionStart &&
+        fromDate.getTime() > admissionStart.getTime()
+      ) {
+        chargeStart = fromDate;
+      } else if (!admissionStart && !Number.isNaN(fromDate.getTime())) {
+        chargeStart = fromDate;
+      }
+    }
+
+    const chargeDays = countBillableDays(chargeStart, end);
+    const amount = chargeDays * rate;
+    if (Number(charge.days) !== chargeDays || Number(charge.amount) !== amount) {
+      charge.days = chargeDays;
       charge.amount = amount;
       changed = true;
     }

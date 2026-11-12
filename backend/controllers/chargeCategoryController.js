@@ -6,10 +6,12 @@ exports.getCategories = async (req, res) => {
     const filter = {};
     if (req.query.unit) filter.unit = req.query.unit;
     if (req.query.subType) filter.subType = req.query.subType;
+    if (req.query.acType !== undefined) filter.acType = req.query.acType;
 
     const categories = await ChargeCategory.find(filter).sort({
       unit: 1,
       subType: 1,
+      acType: 1,
       name: 1,
     });
     res.json(categories);
@@ -20,13 +22,14 @@ exports.getCategories = async (req, res) => {
 
 exports.createCategory = async (req, res) => {
   try {
-    const { name, ratePerDay, autoAttach, unit, subType } = req.body;
+    const { name, ratePerDay, autoAttach, unit, subType, acType, acAddon } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ message: 'Charge name is required' });
     }
 
-    const normalized = normalizeUnitSubType(unit, subType);
+    const flag = acAddon !== undefined ? acAddon : acType;
+    const normalized = normalizeUnitSubType(unit, subType, flag);
     if (normalized.error) {
       return res.status(400).json({ message: normalized.error });
     }
@@ -35,10 +38,13 @@ exports.createCategory = async (req, res) => {
       name: name.trim(),
       unit: normalized.unit,
       subType: normalized.subType,
+      acType: normalized.acType,
     });
     if (exists) {
       return res.status(400).json({
-        message: 'Charge category already exists for this unit and sub-type',
+        message: normalized.acType
+          ? 'This AC add-on charge already exists for Ward Admission'
+          : 'Charge category already exists for this unit and sub-type',
       });
     }
 
@@ -46,6 +52,7 @@ exports.createCategory = async (req, res) => {
       name: name.trim(),
       unit: normalized.unit,
       subType: normalized.subType,
+      acType: normalized.acType,
       ratePerDay: Number(ratePerDay) || 0,
       autoAttach: Boolean(autoAttach),
     });
@@ -54,7 +61,7 @@ exports.createCategory = async (req, res) => {
   } catch (error) {
     if (error.code === 11000) {
       return res.status(400).json({
-        message: 'Charge category already exists for this unit and sub-type',
+        message: 'Charge category already exists for this scope',
       });
     }
     res.status(500).json({ message: error.message });
@@ -63,7 +70,7 @@ exports.createCategory = async (req, res) => {
 
 exports.updateCategory = async (req, res) => {
   try {
-    const { name, ratePerDay, autoAttach, unit, subType } = req.body;
+    const { name, ratePerDay, autoAttach, unit, subType, acType, acAddon } = req.body;
     const category = await ChargeCategory.findById(req.params.id);
 
     if (!category) {
@@ -72,7 +79,13 @@ exports.updateCategory = async (req, res) => {
 
     const nextUnit = unit !== undefined ? unit : category.unit;
     const nextSubType = subType !== undefined ? subType : category.subType;
-    const normalized = normalizeUnitSubType(nextUnit, nextSubType);
+    const nextAcFlag =
+      acAddon !== undefined
+        ? acAddon
+        : acType !== undefined
+          ? acType
+          : category.acType;
+    const normalized = normalizeUnitSubType(nextUnit, nextSubType, nextAcFlag);
     if (normalized.error) {
       return res.status(400).json({ message: normalized.error });
     }
@@ -87,6 +100,7 @@ exports.updateCategory = async (req, res) => {
 
     category.unit = normalized.unit;
     category.subType = normalized.subType;
+    category.acType = normalized.acType;
 
     if (ratePerDay !== undefined) {
       category.ratePerDay = Number(ratePerDay) || 0;
@@ -100,11 +114,12 @@ exports.updateCategory = async (req, res) => {
       name: category.name,
       unit: category.unit,
       subType: category.subType,
+      acType: category.acType,
       _id: { $ne: category._id },
     });
     if (exists) {
       return res.status(400).json({
-        message: 'Charge category already exists for this unit and sub-type',
+        message: 'Charge category already exists for this scope',
       });
     }
 
@@ -113,7 +128,7 @@ exports.updateCategory = async (req, res) => {
   } catch (error) {
     if (error.code === 11000) {
       return res.status(400).json({
-        message: 'Charge category already exists for this unit and sub-type',
+        message: 'Charge category already exists for this scope',
       });
     }
     res.status(500).json({ message: error.message });

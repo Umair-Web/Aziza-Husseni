@@ -12,6 +12,10 @@ import Expenses from './pages/Expenses';
 import CreatePatient from './pages/CreatePatient';
 import PatientDetail from './pages/PatientDetail';
 import Terminology from './pages/Terminology';
+import RmoConsultant from './pages/RmoConsultant';
+import Referrals from './pages/Referrals';
+import UserCredentials from './pages/UserCredentials';
+import WhatsappSetup from './pages/WhatsappSetup';
 
 function homePath(role) {
   if (role === 'registration') return '/patients/new';
@@ -82,6 +86,38 @@ export default function App() {
               element={
                 <RoleRoute allow={['admin', 'staff']}>
                   <Categories />
+                </RoleRoute>
+              }
+            />
+            <Route
+              path="/rmo-consultant"
+              element={
+                <RoleRoute allow={['admin', 'staff']}>
+                  <RmoConsultant />
+                </RoleRoute>
+              }
+            />
+            <Route
+              path="/referrals"
+              element={
+                <RoleRoute allow={['admin', 'staff']}>
+                  <Referrals />
+                </RoleRoute>
+              }
+            />
+            <Route
+              path="/user-credentials"
+              element={
+                <RoleRoute allow={['admin']}>
+                  <UserCredentials />
+                </RoleRoute>
+              }
+            />
+            <Route
+              path="/whatsapp-setup"
+              element={
+                <RoleRoute allow={['admin']}>
+                  <WhatsappSetup />
                 </RoleRoute>
               }
             />

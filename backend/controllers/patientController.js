@@ -5,6 +5,12 @@ const {
   countBillableDays,
   applyBillableDaysToPatient,
 } = require('../utils/billingDays');
+const {
+  chargesTotal,
+  patientDiscountAmount,
+  netChargesTotal,
+} = require('../utils/billing');
+const { chargeScopeFilter } = require('../utils/chargeUnits');
 
 const computeAmount = (item) => {
   if (item.days > 0 && item.ratePerDay > 0) {
@@ -38,6 +44,82 @@ const syncBillableDays = async (patient, explicitEnd) => {
   return days;
 };
 
+const chargeBillingStart = (patient, charge) => {
+  const admissionStart =
+    combineDateAndTime(patient.admissionDate, patient.admissionTime) ||
+    (patient.admissionDate ? new Date(patient.admissionDate) : new Date());
+  if (charge?.date) {
+    const fromDate = new Date(charge.date);
+    if (!Number.isNaN(fromDate.getTime()) && fromDate.getTime() > admissionStart.getTime()) {
+      return fromDate;
+    }
+  }
+  return admissionStart;
+};
+
+/** Freeze a daily auto-charge in place. Returns true if stopped. */
+const stopDailyCharge = (patient, charge, stopAt = new Date()) => {
+  const rate = Number(charge.ratePerDay) || 0;
+  if (rate <= 0 || charge.autoDays === false || charge.stoppedAt) return false;
+
+  const chargeStart = chargeBillingStart(patient, charge);
+  const frozenDays = countBillableDays(chargeStart, stopAt);
+
+  charge.days = frozenDays;
+  charge.amount = frozenDays * rate;
+  charge.autoDays = false;
+  charge.stoppedAt = stopAt;
+
+  const stopLabel = stopAt.toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+  const stopNote = `Stopped on ${stopLabel} (${frozenDays} day${frozenDays === 1 ? '' : 's'})`;
+  const existing = String(charge.note || '').trim();
+  if (!existing.includes('Stopped on')) {
+    charge.note = existing ? `${existing} · ${stopNote}` : stopNote;
+  }
+  return true;
+};
+
+const hasActiveParticular = (patient, particular, exceptId) =>
+  (patient.charges || []).some(
+    (c) =>
+      c._id.toString() !== String(exceptId) &&
+      c.particular === particular &&
+      Number(c.ratePerDay) > 0 &&
+      c.autoDays !== false &&
+      !c.stoppedAt
+  );
+
+/** Start a new active period from a stopped charge. Returns true if resumed. */
+const resumeDailyCharge = (patient, charge, now = new Date()) => {
+  const rate = Number(charge.ratePerDay) || 0;
+  if (rate <= 0) return false;
+  if (!charge.stoppedAt && charge.autoDays !== false) return false;
+  if (hasActiveParticular(patient, charge.particular, charge._id)) return false;
+
+  const resumeDays = countBillableDays(now, now);
+  const resumeLabel = now.toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+
+  patient.charges.push({
+    particular: charge.particular,
+    days: resumeDays,
+    ratePerDay: rate,
+    amount: resumeDays * rate,
+    note: `Activated again from ${resumeLabel}`,
+    date: now,
+    autoDays: true,
+    stoppedAt: null,
+  });
+  return true;
+};
+
 const generateHospitalRegNo = async () => {
   const year = new Date().getFullYear();
   const prefix = `AHH-${year}-`;
@@ -61,9 +143,17 @@ const generateHospitalRegNo = async () => {
 
 exports.getParticulars = async (req, res) => {
   try {
-    const filter = {};
-    if (req.query.unit) filter.unit = req.query.unit;
-    if (req.query.subType) filter.subType = req.query.subType;
+    const unit = req.query.unit;
+    const subType = req.query.subType;
+    const patientAcType = req.query.acType || '';
+
+    let filter = {};
+    if (unit && subType) {
+      filter = chargeScopeFilter(unit, subType, patientAcType);
+    } else {
+      if (unit) filter.unit = unit;
+      if (subType) filter.subType = subType;
+    }
 
     const categories = await ChargeCategory.find(filter).sort({ name: 1 });
     res.json(
@@ -73,6 +163,7 @@ exports.getParticulars = async (req, res) => {
         ratePerDay: c.ratePerDay,
         unit: c.unit,
         subType: c.subType,
+        acType: c.acType || '',
         autoAttach: c.autoAttach,
       }))
     );
@@ -165,11 +256,13 @@ exports.createPatient = async (req, res) => {
     const {
       bedNo,
       careType,
+      acType,
       name,
       relativeOf,
       gender,
       age,
       ageUnit,
+      weight,
       address,
       telNo,
       referralType,
@@ -208,11 +301,21 @@ exports.createPatient = async (req, res) => {
           : 'Admission'
         : 'Admission';
 
+    let resolvedAcType = '';
+    if (bedNo === 'Ward') {
+      if (!['With AC', 'Without AC'].includes(acType)) {
+        return res.status(400).json({
+          message: 'Ward Admission requires selecting With AC or Without AC',
+        });
+      }
+      resolvedAcType = acType;
+    }
+
     const resolvedAgeUnit = ['Days', 'Months', 'Years'].includes(ageUnit)
       ? ageUnit
       : 'Years';
 
-    const scopeFilter = { unit: bedNo, subType: resolvedCareType };
+    const scopeFilter = chargeScopeFilter(bedNo, resolvedCareType, resolvedAcType);
 
     let selectedNames;
     if (Array.isArray(chargeCategories)) {
@@ -261,11 +364,16 @@ exports.createPatient = async (req, res) => {
           hospitalRegNo,
           bedNo,
           careType: resolvedCareType,
+          acType: resolvedAcType,
           name,
           relativeOf,
           gender,
           age,
           ageUnit: resolvedAgeUnit,
+          weight:
+            weight === undefined || weight === '' || weight === null
+              ? null
+              : Number(weight),
           address,
           telNo,
           referralType: referralType || '',
@@ -331,11 +439,13 @@ exports.updatePatient = async (req, res) => {
     const profileFields = [
       'bedNo',
       'careType',
+      'acType',
       'name',
       'relativeOf',
       'gender',
       'age',
       'ageUnit',
+      'weight',
       'address',
       'telNo',
       'referralType',
@@ -352,7 +462,7 @@ exports.updatePatient = async (req, res) => {
       'patientType',
     ];
 
-    const billingFields = ['advance'];
+    const billingFields = ['advance', 'discountType', 'discountValue'];
 
     const clinicalFields = [
       'principleDiagnosis',
@@ -367,7 +477,7 @@ exports.updatePatient = async (req, res) => {
 
     // Registration / clinician: profile details.
     // Clinician also writes clinical summary.
-    // Admin/staff: profile + advance (clinical applied at discharge).
+    // Admin/staff: profile + advance / discount (clinical applied at discharge).
     let fields = [...profileFields];
     if (isClinician) {
       fields = [...fields, ...clinicalFields];
@@ -382,12 +492,40 @@ exports.updatePatient = async (req, res) => {
       if (req.body[field] === undefined) return;
       if (patient.status === 'discharged' && blockedWhenDischarged.includes(field)) return;
 
-      if (field === 'age' || field === 'advance') {
+      if (field === 'age' || field === 'advance' || field === 'discountValue') {
         patient[field] = Number(req.body[field]) || 0;
+      } else if (field === 'discountType') {
+        const raw = String(req.body[field] || '').trim();
+        patient.discountType =
+          raw === 'percentage' || raw === 'fixed' ? raw : '';
+        if (!patient.discountType) patient.discountValue = 0;
+      } else if (field === 'weight') {
+        const raw = req.body[field];
+        patient.weight =
+          raw === '' || raw === null || raw === undefined ? null : Number(raw);
       } else {
         patient[field] = req.body[field];
       }
     });
+
+    if (patient.discountType === 'percentage' && Number(patient.discountValue) > 100) {
+      patient.discountValue = 100;
+    }
+
+    if (patient.bedNo === 'Ward') {
+      // Legacy Ward rows without acType default to With AC
+      if (!['With AC', 'Without AC'].includes(patient.acType)) {
+        if (req.body.acType !== undefined) {
+          return res.status(400).json({
+            message: 'Ward Admission requires selecting With AC or Without AC',
+          });
+        }
+        patient.acType = 'With AC';
+      }
+      patient.careType = 'Admission';
+    } else {
+      patient.acType = '';
+    }
 
     if (
       isClinician &&
@@ -484,11 +622,15 @@ exports.addCharge = async (req, res) => {
       return res.status(400).json({ message: 'Days must be greater than 0' });
     }
 
-    // Rate always comes from Charge Category for this patient's unit / care type
+    // Rate from Charge Category: shared Ward charges + AC add-on when With AC
+    const scope = chargeScopeFilter(
+      patient.bedNo,
+      patient.careType || 'Admission',
+      patient.acType || ''
+    );
     const category = await ChargeCategory.findOne({
       name: String(particular).trim(),
-      ...(patient.bedNo ? { unit: patient.bedNo } : {}),
-      ...(patient.careType ? { subType: patient.careType } : {}),
+      ...scope,
     });
 
     const rate = category
@@ -590,9 +732,159 @@ exports.removeCharge = async (req, res) => {
       return res.status(404).json({ message: 'Charge not found' });
     }
 
+    const rate = Number(charge.ratePerDay) || 0;
+    const permanent = String(req.query.permanent || '') === 'true';
+
+    // Daily auto-charges: stop & freeze days used so far (keep on bill for discharge)
+    if (rate > 0 && charge.autoDays !== false && !charge.stoppedAt && !permanent) {
+      stopDailyCharge(patient, charge);
+      const billableDays = await syncBillableDays(patient);
+      return res.json(withBillableDays(patient, billableDays));
+    }
+
+    // Flat charges, already-stopped lines, or explicit permanent delete
     charge.deleteOne();
     const billableDays = await syncBillableDays(patient);
     res.json(withBillableDays(patient, billableDays));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** Stop several active daily charges at once */
+exports.batchStopCharges = async (req, res) => {
+  try {
+    const patient = await Patient.findById(req.params.id);
+    if (!patient) {
+      return res.status(404).json({ message: 'Patient not found' });
+    }
+    if (patient.status === 'discharged') {
+      return res.status(400).json({ message: 'Cannot modify charges of a discharged patient' });
+    }
+
+    const ids = Array.isArray(req.body.chargeIds)
+      ? [...new Set(req.body.chargeIds.map((id) => String(id)))]
+      : [];
+    if (!ids.length) {
+      return res.status(400).json({ message: 'Select at least one charge to stop' });
+    }
+
+    const stopAt = new Date();
+    let stopped = 0;
+    for (const id of ids) {
+      const charge = patient.charges.id(id);
+      if (!charge) continue;
+      if (stopDailyCharge(patient, charge, stopAt)) stopped += 1;
+    }
+
+    if (stopped === 0) {
+      return res.status(400).json({
+        message: 'No active daily charges were stopped (select active charges)',
+      });
+    }
+
+    const { days } = applyBillableDaysToPatient(patient);
+    await patient.save();
+    res.json(withBillableDays(patient, days));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** Resume a stopped daily charge: keep frozen line, start a new auto period from now */
+exports.resumeCharge = async (req, res) => {
+  try {
+    const patient = await Patient.findById(req.params.id);
+    if (!patient) {
+      return res.status(404).json({ message: 'Patient not found' });
+    }
+
+    if (patient.status === 'discharged') {
+      return res.status(400).json({ message: 'Cannot modify charges of a discharged patient' });
+    }
+
+    const charge = patient.charges.id(req.params.chargeId);
+    if (!charge) {
+      return res.status(404).json({ message: 'Charge not found' });
+    }
+
+    const rate = Number(charge.ratePerDay) || 0;
+    if (rate <= 0) {
+      return res.status(400).json({
+        message: 'Only daily-rate charges can be activated again',
+      });
+    }
+
+    if (!charge.stoppedAt && charge.autoDays !== false) {
+      return res.status(400).json({
+        message: 'This charge is already active',
+      });
+    }
+
+    if (hasActiveParticular(patient, charge.particular, charge._id)) {
+      return res.status(400).json({
+        message: `"${charge.particular}" is already active on this bill`,
+      });
+    }
+
+    if (!resumeDailyCharge(patient, charge)) {
+      return res.status(400).json({ message: 'Could not activate this charge' });
+    }
+
+    const { days } = applyBillableDaysToPatient(patient);
+    await patient.save();
+    res.status(201).json(withBillableDays(patient, days));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/** Activate several stopped daily charges at once */
+exports.batchResumeCharges = async (req, res) => {
+  try {
+    const patient = await Patient.findById(req.params.id);
+    if (!patient) {
+      return res.status(404).json({ message: 'Patient not found' });
+    }
+    if (patient.status === 'discharged') {
+      return res.status(400).json({ message: 'Cannot modify charges of a discharged patient' });
+    }
+
+    const ids = Array.isArray(req.body.chargeIds)
+      ? [...new Set(req.body.chargeIds.map((id) => String(id)))]
+      : [];
+    if (!ids.length) {
+      return res.status(400).json({ message: 'Select at least one charge to activate' });
+    }
+
+    const now = new Date();
+    let resumed = 0;
+    const skipped = [];
+    for (const id of ids) {
+      const charge = patient.charges.id(id);
+      if (!charge) continue;
+      if (!charge.stoppedAt || !(Number(charge.ratePerDay) > 0)) {
+        skipped.push(charge.particular || id);
+        continue;
+      }
+      if (hasActiveParticular(patient, charge.particular, charge._id)) {
+        skipped.push(charge.particular);
+        continue;
+      }
+      if (resumeDailyCharge(patient, charge, now)) resumed += 1;
+    }
+
+    if (resumed === 0) {
+      return res.status(400).json({
+        message: skipped.length
+          ? `None activated. Already active or not stopped: ${[...new Set(skipped)].join(', ')}`
+          : 'No stopped daily charges were activated',
+      });
+    }
+
+    const { days } = applyBillableDaysToPatient(patient);
+    await patient.save();
+    res.status(201).json(withBillableDays(patient, days));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -612,6 +904,7 @@ exports.dischargePatient = async (req, res) => {
     const {
       dischargeDate,
       dischargeTime,
+      dischargeType,
       amountReceived,
       advance,
       principleDiagnosis,
@@ -625,6 +918,13 @@ exports.dischargePatient = async (req, res) => {
       followUpTime,
       patientType,
     } = req.body;
+
+    const allowedDischargeTypes = ['DOR', 'LAMA', 'Referral'];
+    if (!allowedDischargeTypes.includes(dischargeType)) {
+      return res.status(400).json({
+        message: 'Discharge type is required (DOR, LAMA, or Referral)',
+      });
+    }
 
     const nextDischargeDate = dischargeDate || new Date();
     const nextDischargeTime = dischargeTime || '';
@@ -658,12 +958,8 @@ exports.dischargePatient = async (req, res) => {
     }
     refreshAmountReceivedTotal(patient);
 
-    const chargesTotal = (patient.charges || []).reduce(
-      (sum, c) => sum + (Number(c.amount) || 0),
-      0
-    );
     const remainingDue =
-      chargesTotal -
+      netChargesTotal(patient) -
       (Number(patient.advance) || 0) -
       (Number(patient.amountReceived) || 0);
     if (remainingDue > 0.009) {
@@ -675,6 +971,7 @@ exports.dischargePatient = async (req, res) => {
     patient.status = 'discharged';
     patient.dischargeDate = nextDischargeDate;
     patient.dischargeTime = nextDischargeTime;
+    patient.dischargeType = dischargeType;
     patient.principleDiagnosis = principleDiagnosis || '';
     patient.associateDiagnosis = associateDiagnosis || '';
     patient.historyExamination = historyExamination || '';
@@ -741,26 +1038,27 @@ exports.getEarnings = async (req, res) => {
 
     const patients = await Patient.find(filter)
       .select(
-        'name hospitalRegNo bedNo status charges advance amountReceived admissionDate admissionTime dischargeDate dischargeTime'
+        'name hospitalRegNo bedNo status charges advance discountType discountValue amountReceived admissionDate admissionTime dischargeDate dischargeTime'
       )
       .sort({ createdAt: -1 });
 
     let totalEarnings = 0;
     let totalAdvance = 0;
     let totalReceived = 0;
+    let totalDiscount = 0;
 
     const list = patients.map((patient) => {
       applyBillableDaysToPatient(patient);
-      const chargesTotal = (patient.charges || []).reduce(
-        (sum, c) => sum + (Number(c.amount) || 0),
-        0
-      );
+      const gross = chargesTotal(patient);
+      const discount = patientDiscountAmount(patient);
+      const net = Math.max(0, gross - discount);
       const advance = Number(patient.advance) || 0;
       const amountReceived = Number(patient.amountReceived) || 0;
 
-      totalEarnings += chargesTotal;
+      totalEarnings += net;
       totalAdvance += advance;
       totalReceived += amountReceived;
+      totalDiscount += discount;
 
       return {
         _id: patient._id,
@@ -768,10 +1066,13 @@ exports.getEarnings = async (req, res) => {
         hospitalRegNo: patient.hospitalRegNo,
         bedNo: patient.bedNo || '',
         status: patient.status,
-        chargesTotal,
+        chargesTotal: gross,
+        discount,
+        discountType: patient.discountType || '',
+        discountValue: Number(patient.discountValue) || 0,
         advance,
         amountReceived,
-        balance: chargesTotal - advance,
+        balance: net - advance,
         charges: (patient.charges || []).map((c) => ({
           _id: c._id,
           particular: c.particular,
@@ -786,6 +1087,7 @@ exports.getEarnings = async (req, res) => {
       totalEarnings,
       totalAdvance,
       totalReceived,
+      totalDiscount,
       patientCount: list.length,
       patients: list,
     });

@@ -4,6 +4,10 @@ import * as XLSX from 'xlsx';
 import api from '../api';
 import { useAuth } from '../context/AuthContext';
 import { isUnpaidBill, totalAmountReceived } from '../utils/billingStatus';
+import {
+  discountLabel,
+  patientDiscountAmount,
+} from '../utils/billingDiscount';
 
 function formatDate(d) {
   if (!d) return '—';
@@ -32,9 +36,10 @@ function chargesTotal(patient) {
 function toExcelRows(patients) {
   return patients.map((p) => {
     const total = chargesTotal(p);
+    const discount = patientDiscountAmount(p);
     const advance = Number(p.advance) || 0;
     const received = totalAmountReceived(p);
-    const balance = Math.max(0, total - advance - received);
+    const balance = Math.max(0, total - discount - advance - received);
     return {
       'Hospital Reg No': p.hospitalRegNo || '',
       'Bill No': p.billNo || '',
@@ -46,12 +51,14 @@ function toExcelRows(patients) {
       Phone: p.telNo || '',
       Unit: p.bedNo || '',
       'Care Type': p.careType || '',
+      'AC Option': p.acType || '',
       IPD: p.ipd || '',
       Status: p.status || '',
       'Admission Date': formatDateExcel(p.admissionDate),
       'Admission Time': p.admissionTime || '',
       'Discharge Date': formatDateExcel(p.dischargeDate),
       'Discharge Time': p.dischargeTime || '',
+      'Discharge Type': p.dischargeType || '',
       Diagnosis: p.diagnosis || '',
       'Principle Diagnosis': p.principleDiagnosis || '',
       'Associate Diagnosis': p.associateDiagnosis || '',
@@ -61,6 +68,8 @@ function toExcelRows(patients) {
       'Referral Detail': p.referralDescription || '',
       'Payer Name': p.payerName || '',
       'Total Charges': total,
+      Discount: discount,
+      'Discount Type': discountLabel(p),
       Advance: advance,
       'Amount Received': received,
       Balance: balance,
@@ -242,6 +251,13 @@ export default function PatientHistory() {
                       <span className="badge badge-unpaid">Unpaid Bill</span>
                     )}
                     <span className={`badge badge-${p.status}`}>{p.status}</span>
+                    {p.status === 'discharged' && p.dischargeType && (
+                      <span
+                        className={`badge badge-discharge-type badge-discharge-${p.dischargeType.toLowerCase()}`}
+                      >
+                        {p.dischargeType}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="patient-meta">
@@ -251,6 +267,7 @@ export default function PatientHistory() {
                     <span>
                       Unit: {p.bedNo}
                       {p.careType ? ` · ${p.careType}` : ''}
+                      {p.acType ? ` · ${p.acType}` : ''}
                     </span>
                   )}
                   <span>Admitted: {formatDate(p.admissionDate)}</span>

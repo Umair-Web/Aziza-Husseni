@@ -1,4 +1,8 @@
 import { totalAmountReceived } from '../utils/billingStatus';
+import {
+  discountLabel,
+  patientDiscountAmount,
+} from '../utils/billingDiscount';
 
 function formatDate(d) {
   if (!d) return '';
@@ -104,13 +108,17 @@ export default function PatientBillPrint({ patient, mode = 'simple' }) {
   const detailed = mode === 'detailed';
   const charges = patient.charges || [];
   const total = charges.reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const discount = patientDiscountAmount(patient);
+  const discLabel = discountLabel(patient);
   const advance = Number(patient.advance) || 0;
   const received = totalAmountReceived(patient);
-  const balance = Math.max(0, total - advance);
+  const balance = Math.max(0, total - discount - advance);
+  const wordsAmount = Math.max(0, total - discount);
   const billDate = patient.dischargeDate || new Date();
   const diagnosis =
     patient.principleDiagnosis || patient.diagnosis || '';
   const ipd = patient.ipd || patient.bedNo || '';
+  const summaryRows = 4 + (discount > 0 ? 1 : 0);
 
   return (
     <div className={`bill-print a4-sheet bill-${mode}`}>
@@ -212,10 +220,10 @@ export default function PatientBillPrint({ patient, mode = 'simple' }) {
             </tr>
           ))}
           <tr className="pb-summary-row">
-            <td rowSpan={4} className="pb-words-cell">
+            <td rowSpan={summaryRows} className="pb-words-cell">
               <div className="pb-words">
                 <span className="pb-label">Rupees</span>
-                <span className="pb-words-text">{numberToWords(total)}</span>
+                <span className="pb-words-text">{numberToWords(wordsAmount)}</span>
               </div>
             </td>
             <td className="pb-summary-cell">
@@ -223,6 +231,14 @@ export default function PatientBillPrint({ patient, mode = 'simple' }) {
               <b>{formatAmount(total)}</b>
             </td>
           </tr>
+          {discount > 0 && (
+            <tr className="pb-summary-row">
+              <td className="pb-summary-cell">
+                <span>Discount{discLabel ? ` (${discLabel})` : ''}</span>
+                <b>{formatAmount(discount)}</b>
+              </td>
+            </tr>
+          )}
           <tr className="pb-summary-row">
             <td className="pb-summary-cell">
               <span>Advance</span>
